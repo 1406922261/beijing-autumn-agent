@@ -1,0 +1,23 @@
+# ===== 密钥与本地配置（绝对不能提交）=====
+*_api_key.txt
+*.key
+.env
+.env.local
+.env.*.local
+
+# ===== 构建产物 =====
+/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# ===== 运行时产物 =====
+.playwright-mcp/
+*.log
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

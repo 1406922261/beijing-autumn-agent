@@ -1,0 +1,52 @@
+{
+  "servers": [
+    {
+      "name": "playwright",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest",
+        "--browser=msedge",
+        "--headless",
+        "--snapshot-mode=concise",
+        "--output-dir=.playwright-mcp"
+      ],
+      "include": [
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_find",
+        "browser_click",
+        "browser_close"
+      ],
+      "enabled": true
+    },
+    {
+      "name": "deepwiki",
+      "url": "https://mcp.deepwiki.com/mcp",
+      "enabled": false
+    },
+    {
+      "name": "context7",
+      "url": "https://mcp.context7.com/mcp",
+      "enabled": false
+    },
+    {
+      "name": "autumn-local",
+      "transport": "stdio",
+      "command": "bin\\autumn-mcp.exe",
+      "enabled": false
+    },
+    {
+      "name": "local-filesystem",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "D:\\goproject\\src\\gocode\\project03\\北京赏秋Agent项目"
+      ],
+      "enabled": false
+    }
+  ]
+}
