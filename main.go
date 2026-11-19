@@ -39,7 +39,7 @@ func loadAPIKey() string {
 }
 
 // getLlmTools 注册「北京赏秋」可用的工具
-func getLlmTools() map[string]*tools.ToolDef {
+func getLlmTools(mem *core.Memory, skills []tools.Skill, root string) map[string]*tools.ToolDef {
 	llmTools := make(map[string]*tools.ToolDef)
 
 	autumnSpots := tools.NewGetAutumnSpots() // 赏秋地点库
@@ -50,13 +50,23 @@ func getLlmTools() map[string]*tools.ToolDef {
 	shell := tools.NewExecShell()            // 兜底：执行脚本/网络请求
 	searchWeb := tools.NewSearchWeb()        // 联网搜索（豆包搜索）
 
-	llmTools[autumnSpots.Name] = autumnSpots
-	llmTools[autumnIndex.Name] = autumnIndex
-	llmTools[autumnGuide.Name] = autumnGuide
-	llmTools[weather.Name] = weather
-	llmTools[currentTime.Name] = currentTime
-	llmTools[shell.Name] = shell
-	llmTools[searchWeb.Name] = searchWeb
+	// 长记忆：写入事实 / 检索历史
+	memorySave := tools.NewMemorySave(mem)
+	memoryRecall := tools.NewMemoryRecall(mem)
+
+	// 技能：列出 / 加载
+	listSkills := tools.NewListSkills(skills)
+	loadSkill := tools.NewLoadSkill(skills)
+
+	// 写文件：生成网页、报告等产物
+	writeFile := tools.NewWriteFile(root)
+
+	for _, t := range []*tools.ToolDef{
+		autumnSpots, autumnIndex, autumnGuide, weather, currentTime,
+		shell, searchWeb, memorySave, memoryRecall, listSkills, loadSkill, writeFile,
+	} {
+		llmTools[t.Name] = t
+	}
 	return llmTools
 }
 
@@ -164,15 +174,17 @@ func judgeAutumnSuitable(ctx context.Context, client openai.Client, spot, search
 	return true, strings.TrimLeft(strings.TrimSpace(strings.TrimPrefix(line, "适合")), "，,。：: ")
 }
 
-// runAgent 处理一轮用户输入，内部完成「思考 → 调工具 → 生成文案」的循环
-func runAgent(ctx context.Context, client openai.Client, session *core.Session, llmTools map[string]*tools.ToolDef, chatTools []openai.ChatCompletionToolUnionParam) {
+// runAgent 处理一轮用户输入，内部完成「思考 → 调工具 → 生成文案」的循环。
+// 返回最终文案与本轮调用过的工具名，供长期记忆记录
+func runAgent(ctx context.Context, client openai.Client, session *core.Session, llmTools map[string]*tools.ToolDef, chatTools []openai.ChatCompletionToolUnionParam) (string, []string) {
 	fmt.Println() // 换行，避免查证日志紧贴输入提示
+	var used []string
 	for loop := 0; loop < MaxLoop; loop++ {
 		resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 			Messages:  session.GetMessages(),
 			Tools:     chatTools,
 			Model:     sensenovaModel,
-			MaxTokens: openai.Int(2048),
+			MaxTokens: openai.Int(8192), // 写网页时 write_file 的参数很长，留足输出空间
 		})
 		if err != nil {
 			var apiErr *openai.Error
@@ -182,11 +194,11 @@ func runAgent(ctx context.Context, client openai.Client, session *core.Session, 
 			} else {
 				fmt.Println("😵 出错了:", err)
 			}
-			return
+			return "", used
 		}
 		if len(resp.Choices) == 0 {
 			fmt.Println("😵 模型这次没有返回内容，请再试一次～")
-			return
+			return "", used
 		}
 
 		msg := resp.Choices[0].Message
@@ -195,7 +207,7 @@ func runAgent(ctx context.Context, client openai.Client, session *core.Session, 
 		if len(msg.ToolCalls) == 0 {
 			fmt.Println()
 			fmt.Println(msg.Content)
-			return
+			return msg.Content, used
 		}
 
 		// 先把 assistant 这一轮的 tool_calls 写回历史，再逐条塞入工具结果
@@ -217,6 +229,7 @@ func runAgent(ctx context.Context, client openai.Client, session *core.Session, 
 
 		for _, call := range msg.ToolCalls {
 			name := call.Function.Name
+			used = append(used, name)
 			fmt.Printf("🔧 正在查证：%s(%s)\n", name, call.Function.Arguments)
 
 			toolRe := ""
@@ -237,6 +250,7 @@ func runAgent(ctx context.Context, client openai.Client, session *core.Session, 
 		}
 	}
 	fmt.Println("⚠️ 工具调用轮次达到上限，先聊到这，你可以继续追问～")
+	return "", used
 }
 
 // menuText 终端数字菜单
@@ -252,6 +266,7 @@ const menuText = `=====北京赏秋攻略菜单=====
 8 出行准备&穿搭装备
 9 避坑&注意事项
 10 官网实况（北京旅游网）
+11 技能演示（当场写一个网页）
 0 返回/退出
 =========================`
 
@@ -267,6 +282,7 @@ var menuPrompts = map[string]string{
 	"8": "[菜单 8｜出行准备&穿搭装备] 秋天来北京赏秋要准备什么、怎么穿搭",
 	"9": "[菜单 9｜避坑&注意事项] 北京赏秋有哪些坑和注意事项",
 	"10": "[菜单 10｜官网实况（北京旅游网）] 打开北京旅游网 https://s.visitbeijing.com.cn/ ，看看官网上有哪些赏秋专题、活动或相关景点页面，把看到的关键内容告诉我",
+	"11": "[菜单 11｜技能演示（当场写一个网页）] 用本地技能当场给我写一个北京赏秋的网页，保存到 output/ 目录，写完用一句话告诉我文件路径",
 }
 
 func printWelcome() {
@@ -275,13 +291,108 @@ func printWelcome() {
 	fmt.Println(menuText)
 }
 
+const (
+	memoryDir = "memory" // 长期记忆目录（摘要 + 记录 + 事实）
+	skillsDir = "skills" // 本地技能目录
+
+	// summarizeEvery 每积累这么多轮对话，重写一次长期记忆摘要
+	summarizeEvery = 3
+)
+
+// buildSystemPrompt 拼出完整系统提示词：人设 + 长期记忆 + 技能目录
+func buildSystemPrompt(mem *core.Memory, skills []tools.Skill) string {
+	return prompts.SystemPrompt + mem.PromptBlock() + tools.SkillsPromptBlock(skills)
+}
+
+// summarizeMemory 把「旧摘要 + 新增记录」交给模型压缩成新的长期记忆摘要，并落盘
+func summarizeMemory(ctx context.Context, client openai.Client, mem *core.Memory) {
+	pending := mem.PendingRecords()
+	if len(pending) == 0 {
+		return
+	}
+	old := mem.Summary()
+	if old == "" {
+		old = "（无）"
+	}
+	var b strings.Builder
+	b.WriteString("已有摘要：\n" + old + "\n\n新增对话记录：\n")
+	for _, r := range pending {
+		fmt.Fprintf(&b, "- 问：%s\n  用过的工具：%s\n  答：%s\n", truncate(r.Input, 80), strings.Join(r.Tools, "、"), truncate(r.Answer, 200))
+	}
+
+	resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.SystemMessage("你是对话记忆整理助手，负责把历史对话压缩成长期记忆摘要。"),
+			openai.UserMessage(b.String() + "\n请输出一份不超过 300 字的中文摘要，要求：\n" +
+				"1）保留用户的偏好与约束（如只要免费/人少、不喜欢某地、带娃等）\n" +
+				"2）保留选过/问过的景点与关键结论（花期、交通、住宿、路线要点）\n" +
+				"3）按主题分条，用短句；不要寒暄、不要复述完整文案、不要编造新信息\n只输出摘要正文。"),
+		},
+		Model:     sensenovaModel,
+		MaxTokens: openai.Int(600),
+	})
+	if err != nil {
+		fmt.Println("⚠️ 记忆摘要更新失败：", err)
+		return
+	}
+	if len(resp.Choices) == 0 {
+		return
+	}
+	text := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if text == "" {
+		return
+	}
+	if err := mem.SaveSummary(text); err != nil {
+		fmt.Println("⚠️ 记忆摘要写入失败：", err)
+		return
+	}
+	fmt.Printf("🧠 长期记忆已更新（摘要 %d 字，累计 %d 轮）\n", len([]rune(text)), mem.Count())
+}
+
+// recordTurn 把一轮问答写入长期记忆文件
+func recordTurn(mem *core.Memory, menu, spot, input, answer string, used []string) {
+	if strings.TrimSpace(answer) == "" {
+		return
+	}
+	err := mem.Append(core.Record{Menu: menu, Spot: spot, Input: input, Tools: used, Answer: answer})
+	if err != nil {
+		fmt.Println("⚠️ 记忆写入失败：", err)
+	}
+}
+
+// truncate 按字符数截断文本（用于摘要输入，不影响终端展示）
+func truncate(s string, n int) string {
+	r := []rune(strings.Join(strings.Fields(s), " "))
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return string(r)
+}
+
 func main() {
+	root, err := os.Getwd()
+	if err != nil {
+		root = "."
+	}
+
+	// 长期记忆：启动时从 memory/ 读回摘要、历史记录与用户事实
+	mem := core.NewMemory(memoryDir)
+	if err := mem.Load(); err != nil {
+		fmt.Println("⚠️ 长期记忆读取失败（按空记忆启动）：", err)
+	}
+
+	// 技能：扫描 skills/*/SKILL.md
+	skills, err := tools.LoadSkills(skillsDir)
+	if err != nil {
+		fmt.Println("⚠️ 技能加载失败：", err)
+	}
+
 	session := core.NewSession()
-	session.AddMessage(openai.SystemMessage(prompts.SystemPrompt))
+	session.AddMessage(openai.SystemMessage(buildSystemPrompt(mem, skills)))
 
 	ctx := context.Background()
 
-	llmTools := getLlmTools()
+	llmTools := getLlmTools(mem, skills, root)
 
 	// 读取 mcp_servers.json，循环调用 LoadMCPTools 接入 MCP 扩展工具
 	closers := loadMCPTools(ctx, llmTools)
@@ -299,6 +410,15 @@ func main() {
 		option.WithRequestTimeout(60*time.Second),
 	)
 
+	// runAndRemember 跑一轮 agent，把问答写入长期记忆，并在积累够轮次时刷新摘要
+	runAndRemember := func(question, menu, spot string) {
+		answer, used := runAgent(ctx, client, session, llmTools, chatTools)
+		recordTurn(mem, menu, spot, question, answer, used)
+		if mem.Pending() >= summarizeEvery {
+			summarizeMemory(ctx, client, mem)
+		}
+	}
+
 	printWelcome()
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -310,9 +430,9 @@ func main() {
 	for {
 		// 一行式「继续选择」提示；已选定景点时带上景点名
 		if currentSpot != "" {
-			fmt.Printf("\n🍁 已选「%s」｜请继续选择菜单项（1-10），0 退出：", currentSpot)
+			fmt.Printf("\n🍁 已选「%s」｜请继续选择菜单项（1-11），0 退出：", currentSpot)
 		} else {
-			fmt.Print("\n🍁 请选择数字（0 退出）：")
+			fmt.Print("\n🍁 请选择数字（0 退出，/help 看命令）：")
 		}
 		if !scanner.Scan() {
 			// Scan 返回 false 时要先看 Err：区分正常结束(EOF)与真实读取错误
@@ -331,6 +451,73 @@ func main() {
 		if input == "0" || input == "exit" || input == "quit" || input == "退出" {
 			fmt.Println("\n🍂 秋天很短，北京很美，记得早点来。下次见！")
 			return
+		}
+
+		// ===== 进阶命令：/ 开头，用于查看记忆与技能、自由提问 =====
+		if strings.HasPrefix(input, "/") {
+			fields := strings.Fields(input)
+			cmd := strings.ToLower(fields[0])
+			switch cmd {
+			case "/help":
+				fmt.Print(`
+  命令：
+    /skills          列出本地技能
+    /skill <name>    查看某个技能的完整说明
+    /memory          查看长期记忆摘要与统计
+    /ask <问题>      自由提问（走完整 agent 流程）
+    /help            显示本帮助
+`)
+			case "/skills":
+				if len(skills) == 0 {
+					fmt.Println("当前没有可用技能。")
+				} else {
+					fmt.Printf("\n🧩 已安装 %d 个技能：\n", len(skills))
+					for _, s := range skills {
+						fmt.Printf("  • %-14s %s\n", s.Name, s.Description)
+					}
+				}
+			case "/skill":
+				if len(fields) < 2 {
+					fmt.Println("用法：/skill <技能名>，例如 /skill webpage")
+					continue
+				}
+				found := false
+				for _, s := range skills {
+					if s.Name == fields[1] {
+						found = true
+						fmt.Printf("\n🧩 %s ｜ %s\n目录：%s\n\n%s\n", s.Name, s.Description, s.Dir, s.Body)
+					}
+				}
+				if !found {
+					fmt.Printf("没有名为 %s 的技能，输入 /skills 查看可用技能。\n", fields[1])
+				}
+			case "/memory":
+				fmt.Printf("\n🧠 长期记忆目录：%s\n", mem.Dir())
+				fmt.Printf("历史轮次：%d 轮｜用户事实：%d 条｜待摘要：%d 轮\n", mem.Count(), len(mem.Facts()), mem.Pending())
+				if s := mem.Summary(); s != "" {
+					fmt.Println("\n【摘要】\n" + s)
+				} else {
+					fmt.Println("\n【摘要】暂无（聊几轮后自动生成）")
+				}
+				if facts := mem.Facts(); len(facts) > 0 {
+					fmt.Println("\n【用户事实】")
+					for _, f := range facts {
+						fmt.Printf("- %s（%s）\n", f.Text, f.Time)
+					}
+				}
+			case "/ask":
+				text := strings.TrimSpace(strings.TrimSpace(input)[len("/ask"):])
+				if text == "" {
+					fmt.Println("用法：/ask 你的问题，例如 /ask 帮我写个赏秋网页")
+					continue
+				}
+				session.AddMessage(openai.UserMessage(text))
+				runAndRemember(text, "ask", currentSpot)
+				fmt.Println()
+			default:
+				fmt.Printf("未知命令 %s，输入 /help 查看可用命令。\n", fields[0])
+			}
+			continue
 		}
 
 		// 菜单 1：只列出精选库里的地点名称，让用户选定一个景点；选定后不立即出内容，改由菜单查询
@@ -397,7 +584,7 @@ func main() {
 
 		question, ok := menuPrompts[input]
 		if !ok {
-			fmt.Println("👉 请输入菜单里的数字（1-10），或 0 退出。")
+			fmt.Println("👉 请输入菜单里的数字（1-11），或 0 退出，/help 查看命令。")
 			fmt.Println(menuText)
 			continue
 		}
@@ -408,7 +595,7 @@ func main() {
 		}
 
 		session.AddMessage(openai.UserMessage(question))
-		runAgent(ctx, client, session, llmTools, chatTools)
+		runAndRemember(question, input, currentSpot)
 		fmt.Println()
 	}
 }
